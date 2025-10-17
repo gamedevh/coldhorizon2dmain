@@ -1,0 +1,320 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Cold Horizon 2D — Canvas Prototype (v4 • Phase 1)</title>
+  <style>
+    html, body { height: 100%; margin: 0; background:#0b0f14; color:#dfe7f1; font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; }
+    canvas { display:block; width:100vw; height:100vh; image-rendering: pixelated; }
+    #ui { position: fixed; inset: 0 0 auto 0; padding: 8px 12px; pointer-events: none; display:flex; gap:16px; align-items:center; flex-wrap:wrap; }
+    #stats { font-weight: 600; text-shadow: 0 2px 6px rgba(0,0,0,.6); }
+    #hotbar { position: fixed; left: 50%; bottom: 18px; transform: translateX(-50%); display: flex; gap: 8px; }
+    .slot { width: 56px; height: 56px; border-radius: 10px; background: linear-gradient(#111 0,#1a1f26 100%); outline: 2px solid #2b3340; box-shadow: 0 10px 20px rgba(0,0,0,.4) inset, 0 4px 10px rgba(0,0,0,.4); display:grid; place-items:center; color:#8fb2ff; font-weight:700; pointer-events:auto; }
+    .slot.active { outline-color:#7aa2ff; }
+    .pill { pointer-events:auto; padding:4px 8px; border-radius:999px; background:#0e1621; outline:1px solid #253246; font-size:12px; opacity:.9 }
+    .help { position: fixed; right: 12px; bottom: 12px; opacity:.85; font-size: 12px; line-height:1.35; }
+
+    /* Menu */
+    #menu { position: fixed; inset:0; display:grid; place-items:center; background: radial-gradient(800px 500px at 50% 45%, #0e1520cc, #090c12ee 60%, #06080c 100%); }
+    .card { width:min(560px, 92vw); background:#0d1420; border:1px solid #283246; border-radius:18px; padding:18px; box-shadow: 0 20px 60px rgba(0,0,0,.45); }
+    .row { display:flex; gap:12px; align-items:center; margin:10px 0; }
+    .row label { width:120px; color:#9fb3d0; font-size:14px; }
+    .row input, .row select { flex:1; background:#0a111b; color:#e6eefb; border:1px solid #263044; padding:8px 10px; border-radius:10px; }
+    .btn { background:#1b2b49; color:#cfe1ff; border:1px solid #294167; padding:10px 14px; border-radius:12px; font-weight:700; cursor:pointer; }
+    .btn:hover { filter: brightness(1.1); }
+    #craft, #inv { position: fixed; top: 70px; right: 14px; background:#0d1420; border:1px solid #283246; border-radius:12px; padding:10px; display:none; min-width:240px; pointer-events:auto; max-height:60vh; overflow:auto; }
+    #craft h4, #inv h4 { margin:6px 0 8px; color:#bcd2f5; }
+    .list { display:flex; flex-direction:column; gap:6px; }
+    .list button { text-align:left; background:#0a111b; color:#e6eefb; border:1px solid #263044; padding:8px 10px; border-radius:10px; }
+    .list button:hover { filter: brightness(1.08); }
+  </style>
+  <script src="https://cdn.socket.io/4.7.5/socket.io.min.js"></script>
+  <script>const SERVER_URL='';</script>
+</head>
+<body>
+  <div id="menu">
+    <div class="card">
+      <h2 style="margin:6px 0 12px;color:#dfe7f1">Cold Horizon</h2>
+      <div class="row"><label>Name</label><input id="m_name" maxlength="16" placeholder="Guest"/></div>
+      <div class="row"><label>Color</label><input id="m_color" type="color" value="#67b3ff"/></div>
+      <div class="row"><label>Outfit</label>
+        <select id="m_outfit">
+          <option value="hoodie" selected>Hoodie</option>
+          <option value="jacket">Jacket</option>
+          <option value="worker">Worker</option>
+          <option value="explorer">Explorer</option>
+        </select>
+      </div>
+      <div class="row"><button class="btn" id="m_play">Enter World</button></div>
+      <p style="opacity:.8;font-size:12px;margin:8px 0 0">WASD move • E interact/attack • C craft • I inventory • 1-8 hotbar • F place • B sleep • +/- zoom • L/K/J save/load/clear</p>
+    </div>
+  </div>
+
+  <canvas id="game"></canvas>
+  <div id="ui">
+    <div id="stats">⏱️ <span id="clock">06:00</span> | ☁️ <span id="wx">Clear</span> | ❄️ Warmth <span id="warmth">100</span> | ❤️ <span id="hp">100</span> | 🍖 <span id="hunger">100</span> | 💧 <span id="thirst">100</span> | 🪵 <span id="wood">0</span> | ⛏️ <span id="ore">0</span></div>
+    <div class="pill" id="savePill">Save (L)</div>
+    <div class="pill" id="loadPill">Load (K)</div>
+    <div class="pill" id="clearPill">Clear (J)</div>
+    <div class="pill">MP: <span id="mpState">offline</span></div>
+  </div>
+  <div id="hotbar"></div>
+  <div id="craft"><h4>Crafting (C)</h4><div class="list" id="craftList"></div></div>
+  <div id="inv"><h4>Inventory (I)</h4><div class="list" id="invList"></div></div>
+  <div class="help">WASD move • E interact/attack • C craft • I inventory • 1–8 hotbar • F place • B sleep • Esc cancel • +/– zoom</div>
+
+  <script>
+  // === RNG & Noise ===
+  function mulberry32(a){return function(){var t=a+=0x6D2B79F5;t=Math.imul(t^t>>>15,t|1);t^=t+Math.imul(t^t>>>7,t|61);return ((t^t>>>14)>>>0)/4294967296}}
+  const SEED = 912345; const rand = mulberry32(SEED);
+  function hash(x,y){ const s = Math.sin(x*127.1 + y*311.7 + SEED) * 43758.5453; return s - Math.floor(s); }
+  function lerp(a,b,t){ return a + (b-a)*t; } function smoothstep(t){ return t*t*(3-2*t); }
+  function valueNoise2D(x,y){ const xi=Math.floor(x), yi=Math.floor(y); const xf=x-xi, yf=y-yi; const tl=hash(xi,yi), tr=hash(xi+1,yi), bl=hash(xi,yi+1), br=hash(xi+1,yi+1); const u=smoothstep(xf), v=smoothstep(yf); return lerp(lerp(tl,tr,u), lerp(bl,br,u), v); }
+  function fbm(x,y,oct=5){ let amp=1,f=1,sum=0,norm=0; for(let i=0;i<oct;i++){ sum+=amp*valueNoise2D(x*f,y*f); norm+=amp; amp*=0.5; f*=2; } return sum/norm; }
+
+  // === World ===
+  const TILE_W=64, TILE_H=32; const MAP_W=300, MAP_H=300;
+  const Tile={ WATER:0, SAND:1, GRASS:2, DIRT:3, ROCK:4, SNOW:5, CAVE:6 };
+  const Biome={ FOREST:0, DESERT:1, TUNDRA:2 };
+  const world={ tiles:new Uint8Array(MAP_W*MAP_H), biome:new Uint8Array(MAP_W*MAP_H), trees:[], ores:[], structures:[], drops:[], mobs:[] };
+
+  // time & weather
+  let timeMs=6*60*1000; // start at 06:00; full day = 6 real minutes
+  const DAY_LEN = 6*60*1000; // 6 minutes → 24h
+  const Wx={CLEAR:0, RAIN:1, SNOW:2, STORM:3}; let weather=Wx.CLEAR; let weatherTimer=0; const particles=[];
+
+  function formatClock(){ const dayFrac=(timeMs%DAY_LEN)/DAY_LEN; const hours=Math.floor(dayFrac*24); const mins=Math.floor((dayFrac*24 - hours)*60); return `${String(hours).padStart(2,'0')}:${String(mins).padStart(2,'0')}`; }
+
+  function rollWeather(){ const r=rand(); if(r<0.70) weather=Wx.CLEAR; else if(r<0.85) weather=Wx.RAIN; else if(r<0.95) weather=Wx.SNOW; else weather=Wx.STORM; document.getElementById('wx').textContent=['Clear','Rain','Snow','Storm'][weather]; }
+
+  function tickWeather(dt){ weatherTimer+=dt; if(weatherTimer>45000){ weatherTimer=0; rollWeather(); } // new weather roughly every 45s
+    // make particles
+    if(weather===Wx.RAIN||weather===Wx.STORM){ for(let i=0;i<6;i++){ particles.push({x:Math.random()*canvas.width, y:-10, vx:2, vy:6 + (weather===Wx.STORM?3:0)}); } }
+    if(weather===Wx.SNOW){ for(let i=0;i<3;i++){ particles.push({x:Math.random()*canvas.width, y:-10, vx:Math.sin(performance.now()*0.001)*0.5, vy:1.6}); } }
+    // update particles
+    for(let i=particles.length-1;i>=0;i--){ const p=particles[i]; p.x += p.vx; p.y += p.vy; if(p.y>canvas.height+10) particles.splice(i,1); }
+  }
+
+  // === Generation ===
+  function generateWorld(){
+    for(let y=0;y<MAP_H;y++){
+      for(let x=0;x<MAP_W;x++){
+        const nx=x/MAP_W-0.5, ny=y/MAP_H-0.5; const e=fbm(nx*2.1,ny*2.1,4), m=fbm(nx*3+100,ny*3+100,3), t=fbm(nx*3-50,ny*3-50,3); const r=Math.abs(fbm(nx*0.5+300,ny*0.5-200,2)-0.5);
+        let tile=Tile.GRASS, biome=Biome.FOREST; if(e<0.34||r<0.018) tile=Tile.WATER; else if(e<0.41) tile=Tile.SAND; else if(e>0.81) tile=Tile.ROCK; else tile=(m>0.45)?Tile.GRASS:Tile.DIRT;
+        if(t<0.35){ biome=Biome.TUNDRA; if(tile!==Tile.WATER && e>0.45) tile=Tile.SNOW; } else if(m<0.3 && e>0.4){ biome=Biome.DESERT; if(tile!==Tile.WATER) tile=Tile.SAND; }
+        const cave=fbm(nx*9+70,ny*9-70,4); if(tile!==Tile.WATER && e>0.55 && cave>0.73) tile=Tile.CAVE;
+        world.tiles[y*MAP_W+x]=tile; world.biome[y*MAP_W+x]=biome;
+        const treeChance=fbm(nx*8+50,ny*8+50,3); if((tile===Tile.GRASS||tile===Tile.DIRT)&&biome!==Biome.DESERT&&treeChance>0.64&&rand()<0.65) world.trees.push({x,y,hp:3});
+        const oreChance=fbm(nx*12-30,ny*12+90,4); if((tile===Tile.ROCK||tile===Tile.CAVE)&&oreChance>0.77&&rand()<0.4) world.ores.push({x,y,amount:2});
+      }
+    }
+  }
+
+  // === Canvas & Camera ===
+  const canvas=document.getElementById('game'); const ctx=canvas.getContext('2d');
+  function resize(){ canvas.width=innerWidth*devicePixelRatio; canvas.height=innerHeight*devicePixelRatio; } addEventListener('resize',resize); resize(); ctx.imageSmoothingEnabled=false;
+  const camera={ x: MAP_W*TILE_W/2, y: MAP_H*TILE_H/2, zoom:1 };
+
+  // === Player & Input ===
+  const player={ id:Math.random().toString(36).slice(2,8), name:'', color:'#67b3ff', outfit:'hoodie', x:Math.floor(MAP_W/2), y:Math.floor(MAP_H/2), speed:6, anim:0, moving:false, respawn:null };
+  let wood=0, ore=0, hp=100, hunger=100, thirst=100, warmth=100;
+  const keys=new Set(); addEventListener('keydown',e=>{ const k=e.key.toLowerCase(); if(k>='1'&&k<='8'){ setActiveHotbar(parseInt(k)-1); return;} keys.add(k); if(e.key==='+') camera.zoom=Math.min(camera.zoom+0.05,2); if(e.key==='-') camera.zoom=Math.max(camera.zoom-0.05,0.5); }); addEventListener('keyup',e=>keys.delete(e.key.toLowerCase()));
+
+  let mouse={x:0,y:0,ix:0,iy:0};
+  canvas.addEventListener('mousemove',e=>{ const rect=canvas.getBoundingClientRect(); const sx=(e.clientX-rect.left)*devicePixelRatio; const sy=(e.clientY-rect.top)*devicePixelRatio; mouse.x=sx; mouse.y=sy; const wx=(sx-(canvas.width/2 - camera.x*camera.zoom))/camera.zoom; const wy=(sy-(canvas.height/2 - camera.y*camera.zoom))/camera.zoom; const ix=(wy/(TILE_H/2) + wx/(TILE_W/2))/2; const iy=(wy/(TILE_H/2) - wx/(TILE_W/2))/2; mouse.ix=Math.round(ix); mouse.iy=Math.round(iy); });
+
+  function handleInput(dt){
+    let dx=0,dy=0; if(keys.has('w')){dx-=1;dy-=1;} if(keys.has('s')){dx+=1;dy+=1;} if(keys.has('a')){dx-=1;dy+=1;} if(keys.has('d')){dx+=1;dy-=1;} if(dx||dy){ const len=Math.hypot(dx,dy); dx/=len; dy/=len; }
+    const spBase=player.speed * (weather===Wx.SNOW?0.9:1) * (weather===Wx.STORM?0.95:1);
+    const sp=keys.has('shift')? spBase*1.6:spBase; const dtSec=dt/1000; const nx=player.x+dx*sp*dtSec; const ny=player.y+dy*sp*dtSec;
+    if(inBounds(nx,ny) && !isBlocked(Math.round(nx),Math.round(ny))){ player.x=nx; player.y=ny; player.moving=!!(dx||dy);} else player.moving=false;
+    if(keys.has('e')){ interact(); keys.delete('e'); }
+    if(keys.has('c')){ toggleCraft(); keys.delete('c'); }
+    if(keys.has('i')){ toggleInv(); keys.delete('i'); }
+    if(keys.has('f')){ tryPlace(); keys.delete('f'); }
+    if(keys.has('b')){ trySleep(); keys.delete('b'); }
+    if(keys.has('escape')){ placing=null; hideCraft(); hideInv(); }
+    if(keys.has('l')){ saveGame(); keys.delete('l'); }
+    if(keys.has('k')){ loadGame(true); keys.delete('k'); }
+    if(keys.has('j')){ clearSave(); keys.delete('j'); }
+  }
+
+  function inBounds(x,y){ return x>=1 && y>=1 && x<MAP_W-1 && y<MAP_H-1; }
+  function tileAt(ix,iy){ return world.tiles[iy*MAP_W+ix]; }
+  function isBlocked(ix,iy){ const t=tileAt(ix,iy); if(t===Tile.WATER) return true; for(const s of world.structures){ if(s.x===ix && s.y===iy && (s.type==='wall' || s.type==='campfire' || s.type==='bed')) return true; } return false; }
+
+  // === Interactions / Combat ===
+  function interact(){ const px=Math.round(player.x), py=Math.round(player.y);
+    // attack mob if in range
+    let target=null, td=999; for(const m of world.mobs){ if(m.hp<=0) continue; const d=Math.hypot(m.x-px,m.y-py); if(d<1.8 && d<td){ td=d; target=m; } }
+    if(target){ const dmg=currentAttackDamage(); target.hp-=dmg; damageToolOnAttack(); if(target.hp<=0){ spawnDrop('raw_meat',target.x,target.y,1); } return; }
+    // pickups
+    for(const d of world.drops){ if(!d.alive) continue; const dist=Math.hypot(d.x-px,d.y-py); if(dist<1.0){ d.alive=false; if(d.item==='wood') wood+=d.qty; if(d.item==='ore') ore+=d.qty; if(d.item==='cooked_meat'){ hunger=Math.min(100,hunger+25); thirst=Math.min(100,thirst+5);} if(d.item==='raw_meat'){ inventory.raw_meat=(inventory.raw_meat||0)+d.qty; } updateStats(); }}
+    // trees
+    let best=null,bd=9999; for(const tr of world.trees){ if(tr.hp<=0) continue; const d=Math.hypot(tr.x-px,tr.y-py); if(d<2.0 && d<bd){ bd=d; best=tr; }} if(best){ best.hp--; useToolDurability('axe'); if(best.hp<=0) spawnDrop('wood',best.x,best.y,3); updateStats(); return; }
+    // ore
+    let oBest=null,od=9999; for(const o of world.ores){ if(o.amount<=0) continue; const d=Math.hypot(o.x-px,o.y-py); if(d<2.0 && d<od){ od=d; oBest=o; }} if(oBest){ oBest.amount--; useToolDurability('pickaxe'); if(oBest.amount<=0){} spawnDrop('ore',oBest.x,oBest.y,1); updateStats(); }
+  }
+
+  function spawnDrop(item,x,y,qty){ world.drops.push({item,x,y,qty,alive:true}); }
+
+  // === Crafting / Inventory / Placement ===
+  const inventory={ campfire:0, wall:0, floor:0, torch:0, axe:null, pickaxe:null, raw_meat:0 };
+  function makeTool(tier,type){ const dur= tier==='stone'?60 : tier==='iron'?120 : 30; return {type, tier, dur}; }
+  const recipes={
+    campfire:{cost:{wood:5}, make:()=>inventory.campfire++},
+    wall:{cost:{wood:4}, make:()=>inventory.wall++},
+    floor:{cost:{wood:2}, make:()=>inventory.floor++},
+    torch:{cost:{wood:1, ore:1}, make:()=>inventory.torch++},
+    stone_axe:{cost:{wood:3, ore:1}, make:()=>inventory.axe=makeTool('stone','axe')},
+    stone_pickaxe:{cost:{wood:2, ore:2}, make:()=>inventory.pickaxe=makeTool('stone','pickaxe')},
+    bed:{cost:{wood:10}, make:()=>inventory.bed=(inventory.bed||0)+1},
+    cooked_meat:{cost:{raw_meat:1}, needCampfire:true, make:()=>{ inventory.cooked_meat=(inventory.cooked_meat||0)+1; }}
+  };
+  let placing=null; // {type,x,y}
+
+  function canAfford(cost){ return (wood>=(cost.wood||0)) && (ore>=(cost.ore||0)) && ((inventory.raw_meat||0)>=(cost.raw_meat||0)); }
+  function pay(cost){ wood-=cost.wood||0; ore-=cost.ore||0; inventory.raw_meat=(inventory.raw_meat||0)-(cost.raw_meat||0); }
+
+  function craft(k){ const r=recipes[k]; if(!r) return; if(r.needCampfire && !nearCampfire()) { flash('Need active campfire'); return; } if(canAfford(r.cost)){ pay(r.cost); r.make(); updateStats(); flash('Crafted '+k); renderInv(); } else flash('Missing mats'); }
+  function tryPlace(){ if(!placing){ const t=hotbar[activeSlot]; if(!t || !inventory[t]){ flash('No placeable selected'); return; } placing={type:t}; }
+    else { if(!isBlocked(mouse.ix,mouse.iy) && tileAt(mouse.ix,mouse.iy)!==Tile.WATER){ const sType=placing.type; let s={type:sType,x:mouse.ix,y:mouse.iy,fuel:(sType==='campfire'?120:0)}; if(sType==='bed'){ s.fuel=0; } world.structures.push(s); inventory[sType]--; placing=null; flash('Placed'); } }
+  }
+  function nearCampfire(){ const px=Math.round(player.x), py=Math.round(player.y); for(const s of world.structures){ if(s.type==='campfire' && Math.hypot(s.x-px,s.y-py)<3 && s.fuel>0) return true; } return false; }
+
+  function toggleCraft(){ const el=document.getElementById('craft'); el.style.display= (el.style.display==='block'?'none':'block'); if(el.style.display==='block') renderCraft(); }
+  function hideCraft(){ document.getElementById('craft').style.display='none'; }
+  function renderCraft(){ const list=document.getElementById('craftList'); list.innerHTML=''; for(const [k,r] of Object.entries(recipes)){ const btn=document.createElement('button'); const need = r.needCampfire? ' (campfire)': '';
+      btn.textContent=`${k}${need} — wood:${r.cost.wood||0}${r.cost.ore?`, ore:${r.cost.ore}`:''}${r.cost.raw_meat?`, raw_meat:${r.cost.raw_meat}`:''}`; btn.onclick=()=>craft(k); list.appendChild(btn); } }
+
+  function toggleInv(){ const el=document.getElementById('inv'); el.style.display= (el.style.display==='block'?'none':'block'); if(el.style.display==='block') renderInv(); }
+  function hideInv(){ document.getElementById('inv').style.display='none'; }
+  function renderInv(){ const list=document.getElementById('invList'); list.innerHTML=''; const items={ wood, ore, raw_meat:inventory.raw_meat||0, cooked_meat:inventory.cooked_meat||0 };
+    for(const [k,v] of Object.entries(items)){ const b=document.createElement('button'); b.textContent=`${k}: ${v}`; if(k==='cooked_meat' && v>0){ const eat=document.createElement('button'); eat.textContent='Eat (+25🍖 +5💧)'; eat.onclick=()=>{ inventory.cooked_meat--; hunger=Math.min(100,hunger+25); thirst=Math.min(100,thirst+5); updateStats(); renderInv(); }; list.appendChild(b); list.appendChild(eat);} else { list.appendChild(b);} }
+    const tools=[['axe',inventory.axe],['pickaxe',inventory.pickaxe]]; for(const [name,obj] of tools){ const t=document.createElement('button'); t.textContent=`${name}: ${obj?obj.tier+' ('+obj.dur+')':'none'}`; list.appendChild(t); }
+  }
+
+  // Tools and combat helpers
+  function currentAttackDamage(){ const hb=hotbar[activeSlot]; if(hb==='axe' && inventory.axe) return 2; return 1; }
+  function useToolDurability(which){ if(which==='axe' && inventory.axe){ inventory.axe.dur--; if(inventory.axe.dur<=0){ inventory.axe=null; flash('Axe broke'); } }
+    if(which==='pickaxe' && inventory.pickaxe){ inventory.pickaxe.dur--; if(inventory.pickaxe.dur<=0){ inventory.pickaxe=null; flash('Pickaxe broke'); } } }
+  function damageToolOnAttack(){ if(hotbar[activeSlot]==='axe' && inventory.axe) useToolDurability('axe'); }
+
+  // === Hotbar ===
+  const hotbar=['axe','pickaxe','torch','campfire','wall','floor','bed',null]; let activeSlot=0; buildHotbar();
+  function buildHotbar(){ const bar=document.getElementById('hotbar'); bar.innerHTML=''; for(let i=0;i<8;i++){ const d=document.createElement('div'); d.className='slot'+(i===activeSlot?' active':''); d.textContent=(hotbar[i]||i+1); d.onclick=()=>setActiveHotbar(i); bar.appendChild(d);} }
+  function setActiveHotbar(i){ activeSlot=i; buildHotbar(); }
+
+  // === Survival, temp & weather effects ===
+  let survivalTimer=0; function survivalUpdate(dt){ survivalTimer+=dt; if(survivalTimer>1000){ survivalTimer=0;
+      // clock
+      timeMs = (timeMs + 1000) % DAY_LEN; document.getElementById('clock').textContent=formatClock();
+      // weather
+      tickWeather(1000);
+      // thirst regen in rain
+      if(weather===Wx.RAIN||weather===Wx.STORM) thirst=Math.min(100, thirst+0.15);
+      // warmth drain if cold (night or snow biome)
+      const coldFactor = isColdAtPlayer()? 0.6 : 0.1; warmth=Math.max(0, warmth - coldFactor);
+      // campfire warms you
+      if(nearCampfire()) warmth = Math.min(100, warmth + 1.2);
+      // hunger/thirst base drain
+      hunger=Math.max(0,hunger-0.12); thirst=Math.max(0,thirst-0.22);
+      // hp loss if starving/dehydrated or freezing
+      if(hunger===0||thirst===0||warmth===0) hp=Math.max(0, hp-0.8);
+      // burn campfire fuel
+      for(const s of world.structures){ if(s.type==='campfire'&&s.fuel>0) s.fuel--; }
+      // spawn night mobs
+      spawnNightMobs();
+      updateStats();
+    } }
+
+  function isColdAtPlayer(){ const px=Math.round(player.x), py=Math.round(player.y); const t=tileAt(px,py); const night = isNight(); return night || t===Tile.SNOW; }
+  function isNight(){ const d=(timeMs%DAY_LEN)/DAY_LEN; return (d<0.23 || d>0.72); }
+
+  // === Mobs (wolves) ===
+  function spawnNightMobs(){ if(!isNight()) return; const max=6; let alive=0; for(const m of world.mobs) if(m.hp>0) alive++; if(alive>=max) return; if(Math.random()<0.35){ const rx=Math.round(player.x + (Math.random()<0.5?-1:1) * (10+Math.random()*8)); const ry=Math.round(player.y + (Math.random()<0.5?-1:1) * (10+Math.random()*8)); if(inBounds(rx,ry) && !isBlocked(rx,ry)) world.mobs.push({type:'wolf', x:rx, y:ry, hp:6, speed:3}); }
+  }
+  function updateMobs(dt){ const dtSec=dt/1000; for(const m of world.mobs){ if(m.hp<=0) continue; const d=Math.hypot(m.x-player.x,m.y-player.y); if(d<7){ // chase
+        const dx=(player.x-m.x)/d, dy=(player.y-m.y)/d; m.x += dx*m.speed*dtSec; m.y += dy*m.speed*dtSec; if(d<1.2){ hp = Math.max(0, hp-0.6); }
+      } }
+  }
+
+  // === Sleep / Respawn ===
+  function trySleep(){ const px=Math.round(player.x), py=Math.round(player.y); for(const s of world.structures){ if(s.type==='bed' && Math.hypot(s.x-px,s.y-py)<2){ timeMs = 7*60*1000; // morning
+        player.respawn = {x:s.x, y:s.y}; hp=100; hunger=80; thirst=80; warmth=100; flash('Slept till morning'); updateStats(); return; } } flash('No bed nearby'); }
+  function checkDeath(){ if(hp>0) return; const r=player.respawn || {x:Math.floor(MAP_W/2), y:Math.floor(MAP_H/2)}; player.x=r.x; player.y=r.y; hp=100; hunger=60; thirst=60; warmth=80; flash('You died'); }
+
+  function updateStats(){ document.getElementById('hp').textContent=Math.round(hp); document.getElementById('hunger').textContent=Math.round(hunger); document.getElementById('thirst').textContent=Math.round(thirst); document.getElementById('wood').textContent=wood; document.getElementById('ore').textContent=ore; document.getElementById('warmth').textContent=Math.round(warmth); }
+
+  // === Render Helpers ===
+  function isoToScreen(ix,iy){ const sx=(ix-iy)*(TILE_W/2); const sy=(ix+iy)*(TILE_H/2); return {x:sx,y:sy}; }
+  function drawDiamond(x,y,w,h,fill,stroke){ ctx.beginPath(); ctx.moveTo(x, y - h/2); ctx.lineTo(x + w/2, y); ctx.lineTo(x, y + h/2); ctx.lineTo(x - w/2, y); ctx.closePath(); ctx.fillStyle=fill; ctx.fill(); if(stroke){ ctx.strokeStyle=stroke; ctx.lineWidth=1; ctx.stroke(); } }
+  function tileColor(t,b){ if(t===Tile.WATER) return '#1aa0c6'; if(t===Tile.SAND) return '#d9c785'; if(t===Tile.GRASS) return (b===Biome.FOREST?'#3e8b4e':'#5b946a'); if(t===Tile.DIRT) return '#5e4b3b'; if(t===Tile.ROCK) return '#9ea6af'; if(t===Tile.SNOW) return '#e9f1f9'; if(t===Tile.CAVE) return '#2a2f37'; return '#777'; }
+
+  function drawTile(ix,iy){ const idx=iy*MAP_W+ix; const t=world.tiles[idx], b=world.biome[idx]; const p=isoToScreen(ix,iy); const sx=(canvas.width/2 - camera.x*camera.zoom)+p.x*camera.zoom; const sy=(canvas.height/2 - camera.y*camera.zoom)+p.y*camera.zoom; drawDiamond(sx,sy,TILE_W*camera.zoom,TILE_H*camera.zoom,tileColor(t,b)); const darker='#00000020'; ctx.fillStyle=darker; ctx.beginPath(); ctx.moveTo(sx, sy + (TILE_H*camera.zoom)/2); ctx.lineTo(sx - (TILE_W*camera.zoom)/2, sy); ctx.lineTo(sx, sy); ctx.closePath(); ctx.fill(); if(t===Tile.WATER){ ctx.globalAlpha=0.18; drawDiamond(sx, sy-2*camera.zoom, TILE_W*camera.zoom, TILE_H*camera.zoom, '#ffffff'); ctx.globalAlpha=1; } if(t===Tile.CAVE){ ctx.globalAlpha=.06; drawDiamond(sx, sy, TILE_W*camera.zoom, TILE_H*camera.zoom, '#000'); ctx.globalAlpha=1; } }
+
+  function drawTree(ix,iy,hp_){ const p=isoToScreen(ix,iy); const sx=(canvas.width/2 - camera.x*camera.zoom)+p.x*camera.zoom; const sy=(canvas.height/2 - camera.y*camera.zoom)+p.y*camera.zoom; ctx.fillStyle='#3b2615'; ctx.fillRect(sx-3*camera.zoom, sy-12*camera.zoom, 6*camera.zoom, 12*camera.zoom); ctx.beginPath(); ctx.arc(sx, sy-18*camera.zoom, 12*camera.zoom, 0, Math.PI*2); ctx.fillStyle=(hp_>1)?'#2f6f3a':'#4f8f4f'; ctx.fill(); }
+  function drawOre(ix,iy,amt){ const p=isoToScreen(ix,iy); const sx=(canvas.width/2 - camera.x*camera.zoom)+p.x*camera.zoom; const sy=(canvas.height/2 - camera.y*camera.zoom)+p.y*camera.zoom; ctx.fillStyle='#b9c2d0'; ctx.fillRect(sx-6*camera.zoom, sy-4*camera.zoom, 12*camera.zoom, 8*camera.zoom); if(amt>1){ ctx.fillStyle='#dfe6f2'; ctx.fillRect(sx-2*camera.zoom, sy-6*camera.zoom, 4*camera.zoom, 4*camera.zoom); } }
+
+  function drawPlayer(){ const p=isoToScreen(player.x,player.y); const sx=(canvas.width/2 - camera.x*camera.zoom)+p.x*camera.zoom; const sy=(canvas.height/2 - camera.y*camera.zoom)+p.y*camera.zoom; ctx.fillStyle='rgba(0,0,0,0.35)'; ctx.beginPath(); ctx.ellipse(sx, sy+6*camera.zoom, 10*camera.zoom, 4*camera.zoom, 0, 0, Math.PI*2); ctx.fill(); ctx.fillStyle='#f2e6d9'; ctx.beginPath(); ctx.arc(sx, sy-8*camera.zoom, 7*camera.zoom, 0, Math.PI*2); ctx.fill(); ctx.fillStyle=player.color; ctx.fillRect(sx-6*camera.zoom, sy-4*camera.zoom, 12*camera.zoom, 12*camera.zoom); const phase=Math.sin(player.anim*0.024); const off=player.moving?(phase*3*camera.zoom):0; ctx.fillStyle='#1b2236'; ctx.fillRect(sx-5*camera.zoom+off, sy+8*camera.zoom, 4*camera.zoom, 8*camera.zoom); ctx.fillRect(sx+1*camera.zoom-off, sy+8*camera.zoom, 4*camera.zoom, 8*camera.zoom); ctx.fillStyle='#cfe1ff'; ctx.font=`${12*camera.zoom}px system-ui`; ctx.textAlign='center'; ctx.fillText(player.name||'Guest', sx, sy-22*camera.zoom); }
+
+  function drawStructure(s){ const p=isoToScreen(s.x,s.y); const sx=(canvas.width/2 - camera.x*camera.zoom)+p.x*camera.zoom; const sy=(canvas.height/2 - camera.y*camera.zoom)+p.y*camera.zoom; if(s.type==='campfire'){ ctx.fillStyle='#6b4b2a'; ctx.fillRect(sx-5*camera.zoom, sy+2*camera.zoom, 10*camera.zoom, 3*camera.zoom); if(s.fuel>0){ const f=6+Math.sin(performance.now()*0.02)*2; ctx.fillStyle='#ffb347'; ctx.beginPath(); ctx.arc(sx, sy-2*camera.zoom, f*camera.zoom/2, 0, Math.PI*2); ctx.fill(); } } else if(s.type==='wall'){ ctx.fillStyle='#734c32'; ctx.fillRect(sx-10*camera.zoom, sy-18*camera.zoom, 20*camera.zoom, 20*camera.zoom); } else if(s.type==='floor'){ ctx.globalAlpha=0.7; drawDiamond(sx, sy, TILE_W*camera.zoom, TILE_H*camera.zoom, '#7a5e4a'); ctx.globalAlpha=1; } else if(s.type==='torch'){ ctx.fillStyle='#9a6b3f'; ctx.fillRect(sx-2*camera.zoom, sy-8*camera.zoom, 4*camera.zoom, 8*camera.zoom); ctx.fillStyle='#ffd166'; ctx.beginPath(); ctx.arc(sx, sy-10*camera.zoom, 3*camera.zoom, 0, Math.PI*2); ctx.fill(); } else if(s.type==='bed'){ ctx.fillStyle='#6b7a8a'; ctx.fillRect(sx-12*camera.zoom, sy-6*camera.zoom, 24*camera.zoom, 12*camera.zoom); ctx.fillStyle='#dfe7ff'; ctx.fillRect(sx-10*camera.zoom, sy-4*camera.zoom, 20*camera.zoom, 8*camera.zoom); }
+  }
+
+  function drawGhost(){ if(!placing){ const t=hotbar[activeSlot]; if(!t) return; const p=isoToScreen(mouse.ix,mouse.iy); const sx=(canvas.width/2 - camera.x*camera.zoom)+p.x*camera.zoom; const sy=(canvas.height/2 - camera.y*camera.zoom)+p.y*camera.zoom; ctx.globalAlpha=0.35; if(t==='floor'){ drawDiamond(sx, sy, TILE_W*camera.zoom, TILE_H*camera.zoom, '#9b7a62'); } else if(t==='wall'){ ctx.fillStyle='#9b7a62'; ctx.fillRect(sx-10*camera.zoom, sy-18*camera.zoom, 20*camera.zoom, 20*camera.zoom); } else if(t==='campfire'){ ctx.fillStyle='#6b4b2a'; ctx.fillRect(sx-5*camera.zoom, sy+2*camera.zoom, 10*camera.zoom, 3*camera.zoom); } else if(t==='torch'){ ctx.fillStyle='#ffd166'; ctx.beginPath(); ctx.arc(sx, sy-10*camera.zoom, 3*camera.zoom, 0, Math.PI*2); ctx.fill(); } else if(t==='bed'){ ctx.fillStyle='#8aa0b8'; ctx.fillRect(sx-12*camera.zoom, sy-6*camera.zoom, 24*camera.zoom, 12*camera.zoom); } ctx.globalAlpha=1; }
+  }
+
+  function drawMobs(){ for(const m of world.mobs){ if(m.hp<=0) continue; const p=isoToScreen(m.x,m.y); const sx=(canvas.width/2 - camera.x*camera.zoom)+p.x*camera.zoom; const sy=(canvas.height/2 - camera.y*camera.zoom)+p.y*camera.zoom; // wolf sprite
+      ctx.fillStyle='rgba(0,0,0,0.35)'; ctx.beginPath(); ctx.ellipse(sx, sy+5*camera.zoom, 8*camera.zoom, 3*camera.zoom, 0, 0, Math.PI*2); ctx.fill();
+      ctx.fillStyle='#786b62'; ctx.fillRect(sx-8*camera.zoom, sy-6*camera.zoom, 16*camera.zoom, 8*camera.zoom); // body
+      ctx.fillStyle='#5a4f49'; ctx.fillRect(sx-10*camera.zoom, sy-6*camera.zoom, 6*camera.zoom, 6*camera.zoom); // head
+    }
+  }
+
+  function drawOverlays(){ // day/night tint & weather
+    const d=(timeMs%DAY_LEN)/DAY_LEN; let alpha=0; if(d<0.23) alpha=lerp(0.6,0.2, d/0.23); else if(d>0.72) alpha=lerp(0.2,0.6, (d-0.72)/0.28); else alpha=0; if(alpha>0){ ctx.fillStyle=`rgba(10,14,22,${alpha})`; ctx.fillRect(0,0,canvas.width,canvas.height); }
+    // weather particles
+    if(weather===Wx.RAIN||weather===Wx.STORM){ ctx.strokeStyle='rgba(180,200,255,0.6)'; ctx.lineWidth=1*devicePixelRatio; for(const p of particles){ ctx.beginPath(); ctx.moveTo(p.x,p.y); ctx.lineTo(p.x-3, p.y-8); ctx.stroke(); } }
+    if(weather===Wx.SNOW){ ctx.fillStyle='rgba(255,255,255,0.8)'; for(const p of particles){ ctx.fillRect(p.x,p.y,2,2); } }
+  }
+
+  // === Render Loop ===
+  function render(){ ctx.clearRect(0,0,canvas.width,canvas.height); const grd=ctx.createRadialGradient(canvas.width/2,canvas.height/2,50,canvas.width/2,canvas.height/2,Math.max(canvas.width,canvas.height)/1.2); grd.addColorStop(0,'#0b0f14'); grd.addColorStop(1,'#06080c'); ctx.fillStyle=grd; ctx.fillRect(0,0,canvas.width,canvas.height);
+    const pc=isoToScreen(player.x,player.y); camera.x=pc.x; camera.y=pc.y+20;
+    const startX=Math.max(0,Math.floor(player.x-44)); const endX=Math.min(MAP_W-1,Math.ceil(player.x+44)); const startY=Math.max(0,Math.floor(player.y-44)); const endY=Math.min(MAP_H-1,Math.ceil(player.y+44));
+    for(let y=startY;y<=endY;y++){ for(let x=startX;x<=endX;x++) drawTile(x,y); }
+    for(const o of world.ores){ if(o.amount<=0) continue; if(o.x<startX||o.x>endX||o.y<startY||o.y>endY) continue; drawOre(o.x,o.y,o.amount);} for(const tr of world.trees){ if(tr.hp<=0) continue; if(tr.x<startX||tr.x>endX||tr.y<startY||tr.y>endY) continue; drawTree(tr.x,tr.y,tr.hp);} for(const s of world.structures){ if(s.x<startX||s.x>endX||s.y<startY||s.y>endY) continue; drawStructure(s);} for(const d of world.drops){ if(!d.alive) continue; if(d.x<startX||d.x>endX||d.y<startY||d.y>endY) continue; const p=isoToScreen(d.x,d.y); const sx=(canvas.width/2 - camera.x*camera.zoom)+p.x*camera.zoom; const sy=(canvas.height/2 - camera.y*camera.zoom)+p.y*camera.zoom; ctx.fillStyle=d.item==='wood'?'#a77b4d':(d.item==='ore'?'#b9c2d0':'#ffa070'); ctx.beginPath(); ctx.arc(sx, sy-6*camera.zoom, 4*camera.zoom, 0, Math.PI*2); ctx.fill(); }
+    drawMobs();
+    drawPlayer(); drawGhost();
+    drawOverlays();
+  }
+
+  // === Loop ===
+  let last=performance.now(); function loop(now){ const dt=Math.min(32,now-last); last=now; handleInput(dt); survivalUpdate(dt); updateMobs(dt); player.anim+=player.moving?dt:0; mpHeartbeat(dt); render(); checkDeath(); requestAnimationFrame(loop); }
+
+  // === Save/Load ===
+  function saveGame(){ const save={ player, wood, ore, hp, hunger, thirst, warmth, structures:world.structures, drops:world.drops.filter(d=>d.alive), seed:SEED }; localStorage.setItem('ch2d_save', JSON.stringify(save)); flash('Saved'); }
+  function loadGame(show){ const raw=localStorage.getItem('ch2d_save'); if(!raw){ if(show) flash('No save'); return;} try{ const s=JSON.parse(raw); if(s.seed!==SEED) flash('Different seed'); Object.assign(player,s.player); wood=s.wood||0; ore=s.ore||0; hp=s.hp||100; hunger=s.hunger||100; thirst=s.thirst||100; warmth=s.warmth||100; world.structures=s.structures||[]; world.drops=(s.drops||[]).map(d=>({...d,alive:true})); updateStats(); if(show) flash('Loaded'); }catch(e){ flash('Load failed'); } }
+  function clearSave(){ localStorage.removeItem('ch2d_save'); flash('Save cleared'); }
+
+  // === UI: flash ===
+  function flash(t){ const p=document.getElementById('savePill'); const old=p.textContent; p.textContent=t; setTimeout(()=>p.textContent=old,1200); }
+
+  // === Multiplayer (optional client) ===
+  let socket=null; const otherPlayers=new Map(); function initMP(){ try{ if(window.io && SERVER_URL && SERVER_URL.startsWith('http')){ socket=io(SERVER_URL,{autoConnect:true,transports:['websocket']}); socket.on('connect',()=>{ document.getElementById('mpState').textContent='online'; socket.emit('join',{id:player.id,name:player.name,color:player.color,outfit:player.outfit,x:player.x,y:player.y}); }); socket.on('world',(w)=>{ /* could merge world here */ }); socket.on('state',(list)=>{ otherPlayers.clear(); for(const p of list){ if(p.id===player.id) continue; otherPlayers.set(p.id,p);} }); socket.on('disconnect',()=>document.getElementById('mpState').textContent='offline'); } else document.getElementById('mpState').textContent='offline'; }catch(e){ document.getElementById('mpState').textContent='offline'; } }
+  let mpTimer=0; function mpHeartbeat(dt){ if(!socket||socket.disconnected) return; mpTimer+=dt; if(mpTimer>120){ mpTimer=0; socket.emit('update',{id:player.id,name:player.name,color:player.color,outfit:player.outfit,x:player.x,y:player.y}); socket.emit('saveWorld',{structures:world.structures,trees:world.trees,ores:world.ores}); } }
+
+  // === Self-tests ===
+  (function selfTests(){ console.assert(MAP_W>=200&&MAP_H>=200,'map size'); const a=isoToScreen(0,0), b=isoToScreen(1,1); console.assert(a.y<b.y,'iso y increases'); })();
+
+  // === Menu actions ===
+  document.getElementById('m_play').onclick=()=>{ const n=document.getElementById('m_name').value.trim(); const c=document.getElementById('m_color').value; const o=document.getElementById('m_outfit').value; player.name=n||'Guest'; player.color=c; player.outfit=o; localStorage.setItem('ch2d_profile', JSON.stringify({name:player.name,color:player.color,outfit:player.outfit})); document.getElementById('menu').style.display='none'; startGame(); };
+
+  function startGame(){ generateWorld(); buildHotbar(); const prof=localStorage.getItem('ch2d_profile'); if(prof){ try{ const p=JSON.parse(prof); player.name=p.name||player.name; player.color=p.color||player.color; player.outfit=p.outfit||player.outfit; }catch{} } loadGame(false); initMP(); updateStats(); rollWeather(); requestAnimationFrame(loop); }
+
+  // Prefill menu
+  (function prefill(){ const prof=localStorage.getItem('ch2d_profile'); if(prof){ try{ const p=JSON.parse(prof); document.getElementById('m_name').value=p.name||''; document.getElementById('m_color').value=p.color||'#67b3ff'; document.getElementById('m_outfit').value=p.outfit||'hoodie'; }catch{} } })();
+  </script>
+</body>
+</html>
